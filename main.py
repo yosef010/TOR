@@ -242,3 +242,5 @@ def transfer_file(data: TransferRequest):
         if response:
 
             response.close()
+            if __name__ == "__main__":
+    print("Starting File Transfer Worker...")
