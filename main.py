@@ -204,7 +204,7 @@ def transfer_file(data: TransferRequest):
         result = None
 
 
-        while result is None:
+      while result is None:
 
             status, result = request.next_chunk()
 
@@ -218,5 +218,27 @@ def transfer_file(data: TransferRequest):
                     f"Upload progress: {progress}%"
                 )
 
+        return {
+            "success": True,
+            "file": result
+        }
 
-        return
+    except requests.exceptions.RequestException as e:
+
+        raise HTTPException(
+            status_code=502,
+            detail=f"Source download failed: {str(e)}"
+        )
+
+    except Exception as e:
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
+
+    finally:
+
+        if response:
+
+            response.close()
