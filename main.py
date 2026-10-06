@@ -12,11 +12,6 @@ from googleapiclient.http import MediaIoBaseUpload
 
 app = FastAPI(title="File Transfer Worker")
 
-
-# =========================
-# Configuration
-# =========================
-
 CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB
 
 
@@ -62,59 +57,161 @@ def get_drive_service():
 
 
 # =========================
-# Streaming Reader
+# Remote Seekable File
 # =========================
 
-class HTTPStream:
+class RemoteFile:
 
-    def __init__(self, response):
+    def __init__(self, url):
 
-        self.response = response
+        self.url = url
+        self.position = 0
 
-        self.iterator = response.iter_content(
-            chunk_size=CHUNK_SIZE
+        self.session = requests.Session()
+
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0"
+        })
+
+        # Get file size and verify Range support
+        response = self.session.get(
+            self.url,
+            headers={
+                "Range": "bytes=0-0"
+            },
+            stream=True,
+            timeout=(30, 60)
         )
 
-        self.buffer = b""
+        response.raise_for_status()
+
+        self.range_supported = (
+            response.status_code == 206
+        )
+
+        content_range = response.headers.get(
+            "Content-Range"
+        )
+
+        if content_range and "/" in content_range:
+
+            self.size = int(
+                content_range.split("/")[-1]
+            )
+
+        else:
+
+            content_length = response.headers.get(
+                "Content-Length"
+            )
+
+            if content_length:
+                self.size = int(content_length)
+
+            else:
+                response.close()
+
+                raise RuntimeError(
+                    "Unable to determine remote file size"
+                )
+
+        response.close()
+
+        if not self.range_supported:
+
+            raise RuntimeError(
+                "Source server does not support HTTP Range requests"
+            )
+
+
+    def tell(self):
+
+        return self.position
+
+
+    def seek(self, offset, whence=0):
+
+        if whence == 0:
+
+            new_position = offset
+
+        elif whence == 1:
+
+            new_position = self.position + offset
+
+        elif whence == 2:
+
+            new_position = self.size + offset
+
+        else:
+
+            raise ValueError(
+                "Invalid whence"
+            )
+
+        if new_position < 0:
+
+            raise ValueError(
+                "Negative seek position"
+            )
+
+        self.position = new_position
+
+        return self.position
 
 
     def read(self, size=-1):
 
-        if size == -1:
+        if self.position >= self.size:
 
-            chunks = [self.buffer]
-
-            for chunk in self.iterator:
-
-                if chunk:
-
-                    chunks.append(chunk)
-
-            self.buffer = b""
-
-            return b"".join(chunks)
+            return b""
 
 
-        while len(self.buffer) < size:
+        if size is None or size < 0:
 
-            try:
-
-                chunk = next(self.iterator)
-
-            except StopIteration:
-
-                break
-
-            if chunk:
-
-                self.buffer += chunk
+            size = self.size - self.position
 
 
-        data = self.buffer[:size]
+        end = min(
+            self.position + size - 1,
+            self.size - 1
+        )
 
-        self.buffer = self.buffer[size:]
+
+        response = self.session.get(
+            self.url,
+            headers={
+                "Range": f"bytes={self.position}-{end}"
+            },
+            stream=True,
+            timeout=(30, 300)
+        )
+
+        response.raise_for_status()
+
+
+        if response.status_code != 206:
+
+            response.close()
+
+            raise RuntimeError(
+                "Source server did not honor HTTP Range request"
+            )
+
+
+        data = response.content
+
+        response.close()
+
+
+        self.position += len(data)
 
         return data
+
+
+    def close(self):
+
+        self.session.close()
 
 
 # =========================
@@ -131,49 +228,45 @@ def health():
 
 
 # =========================
-# Transfer File
+# Transfer
 # =========================
 
 @app.post("/transfer")
 def transfer_file(data: TransferRequest):
 
-    response = None
+    remote_file = None
 
     try:
 
-        # ---------------------------------
-        # Open source URL as a stream
-        # ---------------------------------
+        # -------------------------
+        # Open remote file
+        # -------------------------
 
-        response = requests.get(
-            data.url,
-            stream=True,
-            timeout=(30, 300),
-            headers={
-                "User-Agent": "Mozilla/5.0"
-            }
+        remote_file = RemoteFile(
+            data.url
         )
 
-        response.raise_for_status()
+        print(
+            f"Remote file size: "
+            f"{remote_file.size / 1024 / 1024:.2f} MB"
+        )
 
 
-        # ---------------------------------
-        # Google Drive service
-        # ---------------------------------
+        # -------------------------
+        # Google Drive
+        # -------------------------
 
         drive = get_drive_service()
 
 
-        # ---------------------------------
-        # File metadata
-        # ---------------------------------
+        # -------------------------
+        # Metadata
+        # -------------------------
 
         metadata = {
             "name": data.filename
         }
 
-
-        # Optional Google Drive folder
 
         if data.folder_id:
 
@@ -182,14 +275,12 @@ def transfer_file(data: TransferRequest):
             ]
 
 
-        # ---------------------------------
-        # Streaming upload
-        # ---------------------------------
-
-        stream = HTTPStream(response)
+        # -------------------------
+        # Resumable Upload
+        # -------------------------
 
         media = MediaIoBaseUpload(
-            stream,
+            remote_file,
             mimetype=data.mime_type,
             chunksize=CHUNK_SIZE,
             resumable=True
@@ -203,9 +294,9 @@ def transfer_file(data: TransferRequest):
         )
 
 
-        # ---------------------------------
+        # -------------------------
         # Upload
-        # ---------------------------------
+        # -------------------------
 
         result = None
 
@@ -224,19 +315,15 @@ def transfer_file(data: TransferRequest):
                 )
 
 
-        # ---------------------------------
+        # -------------------------
         # Success
-        # ---------------------------------
+        # -------------------------
 
         return {
             "success": True,
             "file": result
         }
 
-
-    # ---------------------------------
-    # Download error
-    # ---------------------------------
 
     except requests.exceptions.RequestException as e:
 
@@ -246,10 +333,6 @@ def transfer_file(data: TransferRequest):
         )
 
 
-    # ---------------------------------
-    # Other errors
-    # ---------------------------------
-
     except Exception as e:
 
         raise HTTPException(
@@ -258,12 +341,8 @@ def transfer_file(data: TransferRequest):
         )
 
 
-    # ---------------------------------
-    # Close source connection
-    # ---------------------------------
-
     finally:
 
-        if response:
+        if remote_file:
 
-            response.close()
+            remote_file.close()
