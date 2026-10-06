@@ -70,6 +70,7 @@ class HTTPStream:
     def __init__(self, response):
 
         self.response = response
+
         self.iterator = response.iter_content(
             chunk_size=CHUNK_SIZE
         )
@@ -86,6 +87,7 @@ class HTTPStream:
             for chunk in self.iterator:
 
                 if chunk:
+
                     chunks.append(chunk)
 
             self.buffer = b""
@@ -129,7 +131,7 @@ def health():
 
 
 # =========================
-# Transfer
+# Transfer File
 # =========================
 
 @app.post("/transfer")
@@ -156,7 +158,7 @@ def transfer_file(data: TransferRequest):
 
 
         # ---------------------------------
-        # Google Drive
+        # Google Drive service
         # ---------------------------------
 
         drive = get_drive_service()
@@ -171,7 +173,7 @@ def transfer_file(data: TransferRequest):
         }
 
 
-        # Optional Drive folder
+        # Optional Google Drive folder
 
         if data.folder_id:
 
@@ -201,10 +203,13 @@ def transfer_file(data: TransferRequest):
         )
 
 
+        # ---------------------------------
+        # Upload
+        # ---------------------------------
+
         result = None
 
-
-      while result is None:
+        while result is None:
 
             status, result = request.next_chunk()
 
@@ -218,10 +223,20 @@ def transfer_file(data: TransferRequest):
                     f"Upload progress: {progress}%"
                 )
 
+
+        # ---------------------------------
+        # Success
+        # ---------------------------------
+
         return {
             "success": True,
             "file": result
         }
+
+
+    # ---------------------------------
+    # Download error
+    # ---------------------------------
 
     except requests.exceptions.RequestException as e:
 
@@ -230,6 +245,11 @@ def transfer_file(data: TransferRequest):
             detail=f"Source download failed: {str(e)}"
         )
 
+
+    # ---------------------------------
+    # Other errors
+    # ---------------------------------
+
     except Exception as e:
 
         raise HTTPException(
@@ -237,10 +257,13 @@ def transfer_file(data: TransferRequest):
             detail=str(e)
         )
 
+
+    # ---------------------------------
+    # Close source connection
+    # ---------------------------------
+
     finally:
 
         if response:
 
             response.close()
-            if __name__ == "__main__":
-    print("Starting File Transfer Worker...")
